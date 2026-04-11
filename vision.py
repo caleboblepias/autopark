@@ -8,8 +8,13 @@ if not os.path.exists(folder):
 
 
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+cap.set(cv2.CAP_PROP_FPS, 60)
+
+print(f"Resolution: {cap.get(cv2.CAP_PROP_FRAME_WIDTH)}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT)}")
+print(f"FPS: {cap.get(cv2.CAP_PROP_FPS)}")
 
 if not cap.isOpened():
     print("error: could not opne camera")
