@@ -1,85 +1,80 @@
-import sys
-# Make sure this points to the directory containing ros_robot_controller_sdk
-sys.path.append('/home/pi/TurboPi/HiwonderSDK/') 
-
+# vision.py
 import cv2
-import os
+import cv2.aruco as aruco
+import numpy as np
+import zmq
+import pickle
 import time
-import ros_robot_controller_sdk as rrc
-import HiwonderSDK.mecanum as mecanum
 
-# Initialize the board
-board = rrc.Board()
-chassis = mecanum.MecanumChassis()
+# --- Load calibration ---
+with open('camera_calibration.pkl', 'rb') as f:
+    calib = pickle.load(f)
+camera_matrix = calib['camera_matrix']
+dist_coeffs = calib['dist_coeffs']
 
+# --- ArUco setup ---
+MARKER_SIZE = 0.0889  # meters — measure your printed marker exactly
+MARKER_ID = 0
 
-# Setup folder
-folder = "parking_data"
-if not os.path.exists(folder):
-    os.makedirs(folder)
+dictionary = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
+parameters = aruco.DetectorParameters()
+detector = aruco.ArucoDetector(dictionary, parameters)
 
-# Camera Setup
+# --- ZeroMQ setup ---
+context = zmq.Context()
+socket = context.socket(zmq.PUB)
+socket.bind("tcp://*:5555")
+time.sleep(0.5)  # slow joiner fix
+
+# --- Camera ---
 cap = cv2.VideoCapture(0)
-# Note: Your camera is YUYV, so it will likely default to 640x480
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-if not cap.isOpened():
-    print("Error: Could not open camera")
-    exit()
-
-print("Camera live!")
-print("Controls: WASD to move camera, Z to save image, Q to quit")
-
-# Default positions (1500 is typically center for TurboPi PWM servos)
-pan = 1500
-tilt = 1500
+print("Vision running, publishing on port 5555")
 
 while True:
     ret, frame = cap.read()
     if not ret:
-        break
+        continue
 
-    # Draw crosshairs
-    h, w, _ = frame.shape
-    cv2.line(frame, (w//2, 0), (w//2, h), (0, 255, 0), 1)
-    cv2.line(frame, (0, h//2), (w, h//2), (0, 255, 0), 1) 
-    
-    # Display the frame
-    cv2.imshow("camera frame", frame)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = detector.detectMarkers(gray)
 
-    # Check for key presses (waits 1ms)
-    key = cv2.waitKey(1) & 0xFF
+    msg = {'has_detection': False, 'timestamp': time.time()}
 
-    # Servo Control (Servo 1: Pan, Servo 2: Tilt)
-    if key == ord('w'):
-        tilt = max(500, tilt - 500)
-        board.pwm_servo_set_position(0.02, [[1, tilt]])
-        print(f"Tilting Up: {tilt}")
-    elif key == ord('s'):
-        tilt = min(2000, tilt + 500)
-        board.pwm_servo_set_position(0.02, [[1, tilt]])
-        print(f"Tilting Down: {tilt}")
-    elif key == ord('a'):
-        pan = min(2500, pan + 500)
-        board.pwm_servo_set_position(0.02, [[2, pan]])
-        print(f"Panning Left: {pan}")
-    elif key == ord('d'):
-        pan = max(500, pan - 500)
-        board.pwm_servo_set_position(0.02, [[2, pan]])
-        print(f"Panning Right: {pan}")
-    elif key == ord('p'):
-        chassis.set_velocity_cartesian(80, 0, 0)  # Move forward
+    if ids is not None:
+        for i, marker_id in enumerate(ids.flatten()):
+            if marker_id == MARKER_ID:
+                # Pose estimation
+                rvec, tvec, _ = aruco.estimatePoseSingleMarkers(
+                    corners[i:i+1], MARKER_SIZE, camera_matrix, dist_coeffs
+                )
 
-    # Save and Quit logic
-    elif key == ord('z'):
-        img_name = f"img_{int(time.time())}.jpg"
-        save_path = os.path.join(folder, img_name)
-        cv2.imwrite(save_path, frame)
-        print(f"Saved: {save_path}")
-    elif key == ord('q'):
-        break
+                # tvec = [x, y, z] in meters relative to camera
+                x = float(tvec[0][0][0])   # lateral offset
+                y = float(tvec[0][0][1])   # vertical offset
+                z = float(tvec[0][0][2])   # distance (depth)
 
-chassis.set_velocity_cartesian(0, 0, 0)  # Move forward
-cap.release()
-cv2.destroyAllWindows()
+                # Heading error from rotation vector
+                R, _ = cv2.Rodrigues(rvec)
+                heading_error = float(np.arctan2(R[0, 2], R[2, 2]))
+
+                # Lateral error normalized
+                img_w = frame.shape[1]
+                cx = (corners[i][0][:, 0].mean()) / img_w
+                lateral_error = float(cx - 0.5)
+
+                msg = {
+                    'has_detection': True,
+                    'timestamp': time.time(),
+                    'lateral_error': lateral_error,
+                    'heading_error': heading_error,
+                    'distance': z,          # meters to marker
+                    'tvec_x': x,
+                    'tvec_y': y,
+                    'tvec_z': z,
+                }
+                break  # only care about first matching marker
+
+    socket.send_json(msg)
