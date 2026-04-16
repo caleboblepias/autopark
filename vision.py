@@ -7,7 +7,7 @@ import pickle
 import time
 
 # --- Load calibration ---
-with open('camera_calibration.pkl', 'rb') as f:
+with open('./calibration/camera_calibration.pkl', 'rb') as f:
     calib = pickle.load(f)
 camera_matrix = calib['camera_matrix']
 dist_coeffs = calib['dist_coeffs']
