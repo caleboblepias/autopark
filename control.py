@@ -11,12 +11,12 @@ import json
 # threshold definition
 CONFIDENCE_THRESHOLD = 1;
 LATERAL_THRESHOLD = 0.05;
-HEADING_THRESHOLD = 5;
+HEADING_THRESHOLD = 15;
 DISTANCE_THRESHOLD_1 = 400;
 DISTANCE_THRESHOLD_2 = 100;
 
 # PID constants
-LK_P = 80;
+LK_P = 300;
 LK_I = 2;
 LK_D = 20;
 
@@ -147,9 +147,7 @@ class MotorCommand:
         self.vx = vx
         self.vy = vy
         self.w = w
-        self.vx_prev = None
-        self.vy_prev = None
-        self.w_prev = None
+        
     def __str__(self):
         return f"MotorCommand: {self.vx}, {self.vy}, {self.w}"
 
@@ -165,9 +163,11 @@ def compute_cmd(state, perception):
                 cmd.vy = 0
                 cmd.w = 0
             case State.ALIGN:
-                cmd.vx = LK_P * perception.LATERAL_ERR * math.cos(math.radians(perception.HEADING_ERR)) 
-                cmd.vy = LK_P * perception.LATERAL_ERR * math.sin(math.radians(perception.HEADING_ERR))
-                cmd.w = LK_P * perception.HEADING_ERR - (cmd.w - cmd.w_prev) / 0.05
+                #cmd.vx = LK_P * perception.LATERAL_ERR * math.cos(math.radians(perception.HEADING_ERR)) 
+                #cmd.vy = LK_P * perception.LATERAL_ERR * math.sin(math.radians(perception.HEADING_ERR))
+                cmd.vx = 0
+                cmd.vy = LK_P * perception.LATERAL_ERR
+                #cmd.w = HK_P * perception.HEADING_ERR
             case State.APPROACH:
                 cmd.vx = D1K_P * perception.DISTANCE_ERR
                 cmd.vy = 0
@@ -187,11 +187,11 @@ def compute_cmd(state, perception):
         cmd.vx = 40
     if (cmd.vy > 40):
         cmd.vy = 40
-    if (abs(cmd.w) > 0.2):
+    if (abs(cmd.w) > 0.1):
         if (cmd.w > 0):
-            cmd.w = 0.2
+            cmd.w = 0.1
         else:
-            cmd.w = -0.2
+            cmd.w = -0.1
     print(cmd)
     return cmd
 
@@ -216,14 +216,14 @@ if __name__ == '__main__':
             break
 
         # send motor command
-        #chassis.set_velocity_cartesian(cmd.vy, cmd.vx, cmd.w)
+        chassis.set_velocity_cartesian(cmd.vy, cmd.vx, cmd.w)
         
         if not start:
             
             print('Motors stopped (main)')
             break
 
-        time.sleep(0.05)
+        #time.sleep(0.05)
 
     
 
