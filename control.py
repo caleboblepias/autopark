@@ -7,6 +7,7 @@ import HiwonderSDK.mecanum as mecanum
 from enum import Enum
 import zmq
 import json
+import traceback
 
 # threshold definition
 CONFIDENCE_THRESHOLD = 1;
@@ -64,11 +65,14 @@ class Perception:
                     self.LAST_SONAR_TS = data["timestamp"]
                 elif data["type"] == "vision":
                     self.SPOT_FOUND = data["has_detection"]
+                    self.LAST_VISION_TS = data["timestamp"]
                     if self.SPOT_FOUND:
                         self.LATERAL_ERR = data["lateral_err"]
                         self.HEADING_ERR = data["heading_err"]
-                        self.LAST_VISION_TS = data["timestamp"]
-                        print(self.LATERAL_ERR)
+                    else:
+                        self.LATERAL_ERR = None
+                        self.HEADING_ERR = None                        
+                    print(self.LATERAL_ERR)
                 
             except zmq.Again:
                 break # no messages
@@ -114,10 +118,10 @@ def update_state(state, perception):
                     return State.SEARCH
             case State.ALIGN:
                 print("ALIGN Mode")
-                if (abs(perception.LATERAL_ERR) < LATERAL_THRESHOLD and abs(perception.HEADING_ERR) < HEADING_THRESHOLD):
-                    return State.APPROACH
-                else:
-                    return State.ALIGN
+                if perception.LATERAL_ERR is not None and perception.HEADING_ERR is not None:
+                    if abs(perception.LATERAL_ERR) < LATERAL_THRESHOLD and abs(perception.HEADING_ERR) < HEADING_THRESHOLD:
+                        return State.APPROACH
+                return State.ALIGN
             case State.APPROACH:
                 print("APPROACH Mode")
                 if (perception.DISTANCE_ERR < DISTANCE_THRESHOLD_1):
@@ -167,11 +171,16 @@ def compute_cmd(state, perception):
                 cmd.vx = 0
                 cmd.vy = 0
                 cmd.w = 0
-            case State.ALIGN
-                cmd.vx = LK_P * perception.LATERAL_ERR * math.cos(perception.HEADING_ERR)
-                cmd.vy = LK_P * perception.LATERAL_ERR * math.sin(perception.HEADING_ERR)
-                #cmd.w = LK_P * perception.HEADING_ERR - (cmd.w - cmd.w_prev) / 0.05
+            case State.ALIGN:
+                if perception.LATERAL_ERR is None or perception.HEADING_ERR is None:
+                    return cmd
+                heading_rad = math.radians(perception.HEADING_ERR)
+                cmd.vx = LK_P * perception.LATERAL_ERR * math.cos(heading_rad)
+                cmd.vy = LK_P * perception.LATERAL_ERR * math.sin(heading_rad)
+                cmd.w = HK_P * perception.HEADING_ERR
             case State.APPROACH:
+                if perception.DISTANCE_ERR is None:
+                    return cmd
                 cmd.vx = D1K_P * perception.DISTANCE_ERR
                 cmd.vy = 0
                 cmd.w = 0
@@ -184,8 +193,10 @@ def compute_cmd(state, perception):
                 cmd.vy = 0
                 cmd.w = 0
 
-    except:
-        print("compute_cmd failed")
+    except Exception as e:
+        print(f"compute_cmd failed: {e}")
+        traceback.print_exc()
+
     if (cmd.vx > 40):
         cmd.vx = 40
     if (cmd.vy > 40):
@@ -203,6 +214,10 @@ if __name__ == '__main__':
     #chassis.set_velocity_cartesian(20, 0, 0) 
     
     while True:
+        if not start:
+            
+            print('Motors stopped (main)')
+            break
         
         # read sensors
         perception.update_perception()
@@ -220,15 +235,5 @@ if __name__ == '__main__':
         # send motor command
         chassis.set_velocity_cartesian(cmd.vy, cmd.vx, cmd.w)
         
-        if not start:
-            
-            print('Motors stopped (main)')
-            break
 
         #time.sleep(0.05)
-
-    
-
-    
-
-
