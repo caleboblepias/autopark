@@ -10,25 +10,25 @@ import json
 
 # threshold definition
 CONFIDENCE_THRESHOLD = 1;
-LATERAL_THRESHOLD = 0.05;
-HEADING_THRESHOLD = 5;
-DISTANCE_THRESHOLD_1 = 400;
-DISTANCE_THRESHOLD_2 = 100;
+LATERAL_THRESHOLD = 1;
+HEADING_THRESHOLD = 1;
+DISTANCE_THRESHOLD_1 = 80;
+DISTANCE_THRESHOLD_2 = 70;
 
 # PID constants
-LK_P = 80;
+LK_P = 3;
 LK_I = 2;
 LK_D = 1;
 
-HK_P = 0.005;
+HK_P = 3;
 HK_I = 2;
 HK_D = 1;
 
-D1K_P = 0.75;
+D1K_P = 0.5;
 D1K_I = 2;
 D1K_D = 1;
 
-D2K_P = 0.25;
+D2K_P = 0.5;
 D2K_I = 2;
 D2K_D = 1;
 
@@ -68,8 +68,8 @@ class Perception:
                         self.LATERAL_ERR = data["lateral_err"]
                         self.HEADING_ERR = data["heading_err"]
                         self.LAST_VISION_TS = data["timestamp"]
-                        print(self.LATERAL_ERR)
-                
+
+                #print(msg)
             except zmq.Again:
                 break # no messages
 
@@ -83,7 +83,6 @@ def stop(signum, frame):
     start = False
     print('Motors stopped')
     chassis.reset_motors()
-    time.sleep(2)
 
 # redirect Ctrl-C to stop function
 signal.signal(signal.SIGINT, stop)
@@ -97,7 +96,7 @@ class State(Enum):
     STOP = 4
 
 # initialize state
-current_state = State.SEARCH
+current_state = State.APPROACH
 
 # initialize perception
 perception = Perception()
@@ -114,7 +113,7 @@ def update_state(state, perception):
                     return State.SEARCH
             case State.ALIGN:
                 print("ALIGN Mode")
-                if (abs(perception.LATERAL_ERR) < LATERAL_THRESHOLD and abs(perception.HEADING_ERR) < HEADING_THRESHOLD):
+                if (perception.LATERAL_ERR < LATERAL_THRESHOLD and perception.HEADING_ERR < HEADING_THRESHOLD):
                     return State.APPROACH
                 else:
                     return State.ALIGN
@@ -133,13 +132,8 @@ def update_state(state, perception):
             case State.STOP:
                 print("STOP Mode")
                 return State.STOP
-
-            case _:
-                print("Default")
-                return current_state
     except:
         print("update_state failed")
-        return current_state
 
 # cmd
 class MotorCommand:
@@ -147,20 +141,13 @@ class MotorCommand:
         self.vx = vx
         self.vy = vy
         self.w = w
-        self.vx_prev = None
-        self.vy_prev = None
-        self.w_prev = None
+
     def __str__(self):
         return f"MotorCommand: {self.vx}, {self.vy}, {self.w}"
-
-
 
 # PID control
 def compute_cmd(state, perception):
     cmd = MotorCommand(0, 0, 0)
-    cmd.vx_prev = cmd.vx
-    cmd.vy_prev = cmd.vy
-    cmd.w_prev = cmd.w
     try:
         match state:
             case State.SEARCH:
@@ -168,9 +155,9 @@ def compute_cmd(state, perception):
                 cmd.vy = 0
                 cmd.w = 0
             case State.ALIGN:
-                cmd.vx = LK_P * perception.LATERAL_ERR * math.cos(perception.HEADING_ERR)
-                cmd.vy = LK_P * perception.LATERAL_ERR * math.sin(perception.HEADING_ERR)
-                #cmd.w = LK_P * perception.HEADING_ERR - (cmd.w - cmd.w_prev) / 0.05
+                cmd.vx = -LK_P * perception.LATERAL_ERR * math.cos(perception.HEADING_ERR)
+                cmd.vy = -LK_P * perception.LATERAL_ERR * math.sin(perception.HEADING_ERR)
+                cmd.w = -LK_P * perception.HEADING_ERR
             case State.APPROACH:
                 cmd.vx = D1K_P * perception.DISTANCE_ERR
                 cmd.vy = 0
@@ -183,25 +170,14 @@ def compute_cmd(state, perception):
                 cmd.vx = 0
                 cmd.vy = 0
                 cmd.w = 0
-
+        print(cmd)
     except:
         print("compute_cmd failed")
-    if (cmd.vx > 40):
-        cmd.vx = 40
-    if (cmd.vy > 40):
-        cmd.vy = 40
-    if (abs(cmd.w) > 0.2):
-        if (cmd.w > 0):
-            cmd.w = 0.2
-        else:
-            cmd.w = -0.2
-    print(cmd)
     return cmd
 
 
 if __name__ == '__main__':
-    #chassis.set_velocity_cartesian(20, 0, 0) 
-    
+    #chassis.set_velocity_cartesian(80, 0, 0) 
     while True:
         
         # read sensors
@@ -211,15 +187,10 @@ if __name__ == '__main__':
         current_state = update_state(current_state, perception)
 
         # compute command
-        cmd = compute_cmd(current_state, perception)
-        
-        if not start:
-            
-            print('Motors stopped (main)')
-            break
+        #cmd = compute_cmd(current_state, perception)
 
         # send motor command
-        chassis.set_velocity_cartesian(cmd.vy, cmd.vx, cmd.w)
+        #chassis.set_velocity_cartesian(cmd.vx, cmd.vy, cmd.w)
         
         if not start:
             
@@ -227,7 +198,5 @@ if __name__ == '__main__':
             break
 
         time.sleep(0.05)
-
-    
 
 

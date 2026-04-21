@@ -57,7 +57,7 @@ while True:
                 z = float(tvec[0][0][2])
 
                 R, _ = cv2.Rodrigues(rvec)
-                heading_error = float(np.arctan2(R[0, 2], R[2, 2]))
+                heading_error = float(np.degrees(np.arctan2(R[0, 2], R[2, 2])))
 
                 if heading_error > 90:
                     heading_error -= 180
@@ -69,10 +69,11 @@ while True:
                 lateral_error = float(cx - 0.5)
 
                 msg = {
+                    'type': 'vision',
                     'has_detection': True,
                     'timestamp': time.time(),
-                    'lateral_error': lateral_error,
-                    'heading_error': heading_error,
+                    'lateral_err': lateral_error,
+                    'heading_err': heading_error,
                     'distance': z,
                     'tvec_x': x,
                     'tvec_y': y,
