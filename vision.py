@@ -13,7 +13,7 @@ camera_matrix = calib['camera_matrix']
 dist_coeffs = calib['dist_coeffs']
 
 # --- ArUco setup ---
-MARKER_SIZE = 0.0889  # meters
+MARKER_SIZE = 0.0508  # meters
 MARKER_ID = 0
 
 dictionary = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
@@ -55,7 +55,7 @@ while True:
                 z = float(tvec[0][0][2])
 
                 R, _ = cv2.Rodrigues(rvec)
-                heading_error = float(np.arctan2(R[0, 2], R[2, 2]))
+                heading_error = float(np.degrees(np.arctan2(R[0, 2], R[2, 2])))
 
                 img_w = frame.shape[1]
                 cx = (corners[i][0][:, 0].mean()) / img_w
@@ -65,8 +65,8 @@ while True:
                     'type': 'vision',
                     'has_detection': True,
                     'timestamp': time.time(),
-                    'lateral_error': lateral_error,
-                    'heading_error': heading_error,
+                    'lateral_err': lateral_error,
+                    'heading_err': heading_error,
                     'distance': z,
                     'tvec_x': x,
                     'tvec_y': y,
