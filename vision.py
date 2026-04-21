@@ -23,7 +23,7 @@ detector = aruco.ArucoDetector(dictionary, parameters)
 # --- ZeroMQ setup ---
 context = zmq.Context()
 socket = context.socket(zmq.PUB)
-socket.bind("tcp://*:5555")
+socket.bind("tcp://*:5556")
 time.sleep(0.5)
 
 # --- Camera ---
@@ -31,7 +31,7 @@ cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-print("Vision running — press 'q' to quit")
+print("Vision running")
 
 while True:
     ret, frame = cap.read()
@@ -41,13 +41,11 @@ while True:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     corners, ids, _ = detector.detectMarkers(gray)
 
-    msg = {'has_detection': False, 'timestamp': time.time()}
-    debug = frame.copy()
+    msg = {'type': 'vision', 'has_detection': False, 'timestamp': time.time()}
 
     if ids is not None:
         for i, marker_id in enumerate(ids.flatten()):
             if marker_id == MARKER_ID:
-                # Pose estimation
                 rvec, tvec, _ = aruco.estimatePoseSingleMarkers(
                     corners[i:i+1], MARKER_SIZE, camera_matrix, dist_coeffs
                 )
@@ -64,6 +62,7 @@ while True:
                 lateral_error = float(cx - 0.5)
 
                 msg = {
+                    'type': 'vision',
                     'has_detection': True,
                     'timestamp': time.time(),
                     'lateral_error': lateral_error,
@@ -73,40 +72,6 @@ while True:
                     'tvec_y': y,
                     'tvec_z': z,
                 }
-
-                # --- Debug visuals ---
-                # Draw marker border
-                aruco.drawDetectedMarkers(debug, corners[i:i+1], ids[i:i+1])
-
-                # Draw coordinate axes on marker
-                cv2.drawFrameAxes(debug, camera_matrix, dist_coeffs,
-                                  rvec, tvec, MARKER_SIZE * 0.5)
-
-                # Overlay text
-                cv2.putText(debug, f"Lateral: {lateral_error:+.3f}",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(debug, f"Heading: {heading_error:+.3f} rad",
-                            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(debug, f"Distance: {z:.3f} m",
-                            (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(debug, f"X: {x:+.3f} Y: {y:+.3f}",
-                            (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
                 break
 
-    else:
-        cv2.putText(debug, "No marker detected",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-    # Draw image center reference line
-    h, w = debug.shape[:2]
-    cv2.line(debug, (w//2, 0), (w//2, h), (255, 255, 0), 1)
-
-    cv2.imshow('Vision Debug', debug)
     socket.send_json(msg)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
