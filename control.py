@@ -17,7 +17,7 @@ import ros_robot_controller_sdk as rrc
 # threshold definition
 CONFIDENCE_THRESHOLD = 1;
 LATERAL_THRESHOLD = 0.05;
-HEADING_THRESHOLD = 10;
+HEADING_THRESHOLD = 12;
 DISTANCE_THRESHOLD_1 = 400;
 DISTANCE_THRESHOLD_2 = 100;
 
@@ -207,12 +207,12 @@ def compute_cmd(state, perception):
 
             case State.ALIGN_HEADING:
                 board.pwm_servo_set_position(0.2, [[2, 1500]])
-                if (pan_angle > 1500):
+                if (pan_angle > 1400):
                     cmd.w = -0.2
                     #pan_angle -= 100
                     #time.sleep(2)
                     #board.pwm_servo_set_position(0.5, [[2, pan_angle]]) 
-                elif (pan_angle < 1500):
+                elif (pan_angle < 1600):
                     cmd.w = 0.2
                     #pan_angle += 100
                     #time.sleep(2)
