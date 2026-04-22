@@ -1,321 +1,185 @@
 import sys
-sys.path.append('/home/pi/TurboPi/')
 import time
 import signal
 import math
-import HiwonderSDK.mecanum as mecanum
 from enum import Enum
 import zmq
 import json
 
+# Ensure paths are correct for TurboPi
+sys.path.append('/home/pi/TurboPi/')
 sys.path.append('/home/pi/TurboPi/HiwonderSDK')
+import HiwonderSDK.mecanum as mecanum
 import ros_robot_controller_sdk as rrc
 
-# ─── Thresholds ───────────────────────────────────────────────
-LATERAL_THRESHOLD    = 0.05   # normalized [-0.5, 0.5]
-HEADING_THRESHOLD    = 15.0   # degrees — wider to account for bang-bang overshoot
-DISTANCE_THRESHOLD_1 = 400    # mm — switch to CREEP
-DISTANCE_THRESHOLD_2 = 100    # mm — stop
+# ─── Thresholds & Tuning ──────────────────────────────────────
+LATERAL_THRESHOLD    = 0.05
+HEADING_THRESHOLD    = 15.0
+DISTANCE_THRESHOLD_1 = 400
+DISTANCE_THRESHOLD_2 = 100
 
-# ─── Bang-bang constants ───────────────────────────────────────
-W_CMD        = 0.2    # minimum w to actuate rotation
-VY_CMD       = 25     # minimum vy to actuate lateral strafe
-
-# ─── Approach constants ────────────────────────────────────────
-D1K_P = 0.75
-D2K_P = 0.25
-
-# ─── Pulse tuning ─────────────────────────────────────────────
-# measure empirically: how many degrees does robot rotate in 100ms at w=0.2?
-DEG_PER_100MS  = 8.0   # update this after measuring
-MIN_PULSE      = 0.05  # seconds
-MAX_PULSE      = 0.20  # seconds
-SETTLE_TIME    = 0.15  # seconds — wait after pulse for robot to stop
+W_CMD  = 0.2
+VY_CMD = 25
+PAN_CENTER = 1500
+PAN_MIN    = 550
+PAN_MAX    = 2450
 
 # ─── Hardware ─────────────────────────────────────────────────
 chassis = mecanum.MecanumChassis()
 board   = rrc.Board()
 
-# ─── Servo state ──────────────────────────────────────────────
-pan_angle   = 1500
-pan_dir     = 100     # +100 = sweeping right, -100 = sweeping left
-pan_rounds  = 0
-PAN_MIN     = 550
-PAN_MAX     = 2450
-PAN_CENTER  = 1500
+class State(Enum):
+    SEARCH         = 0
+    CONFIRM_SIGHT  = 1  # New state: Stop and stare to ensure marker is real
+    ALIGN_HEADING  = 2
+    ALIGN_LATERAL  = 3
+    APPROACH       = 4
+    CREEP          = 5
+    STOP           = 6
 
-# ─── Perception ───────────────────────────────────────────────
 class Perception:
     def __init__(self):
         self.context = zmq.Context()
         self.sub = self.context.socket(zmq.SUB)
-        self.sub.connect("tcp://localhost:5555")  # sonar
-        self.sub.connect("tcp://localhost:5556")  # vision
+        self.sub.connect("tcp://localhost:5555")
+        self.sub.connect("tcp://localhost:5556")
         self.sub.setsockopt_string(zmq.SUBSCRIBE, "")
 
-        self.SPOT_FOUND   = False
-        self.LATERAL_ERR  = None
-        self.HEADING_ERR  = None
-        self.DISTANCE_ERR = None
-        self.LAST_SONAR_TS  = None
-        self.LAST_VISION_TS = None
+        self.SPOT_FOUND    = False
+        self.LATERAL_ERR   = None
+        self.HEADING_ERR   = None
+        self.DISTANCE_ERR  = None
+        
+        # --- NEW: Confidence Logic ---
+        self.confidence_threshold = 5  # Must see marker for 5 frames
+        self.lost_threshold = 10       # Must lose marker for 10 frames to drop it
+        self.frames_seen = 0
+        self.frames_lost = 0
 
     def update(self):
-        """Drain all queued messages, keep latest per type"""
         while True:
             try:
                 msg  = self.sub.recv_string(flags=zmq.NOBLOCK)
                 data = json.loads(msg)
 
                 if data['type'] == 'sonar':
-                    self.DISTANCE_ERR   = data['distance_err']
-                    self.LAST_SONAR_TS  = data['timestamp']
+                    self.DISTANCE_ERR = data['distance_err']
 
                 elif data['type'] == 'vision':
-                    self.SPOT_FOUND     = data['has_detection']
-                    self.LAST_VISION_TS = data['timestamp']
-                    if self.SPOT_FOUND:
+                    if data['has_detection']:
+                        self.frames_seen += 1
+                        self.frames_lost = 0
                         self.LATERAL_ERR = data['lateral_err']
                         self.HEADING_ERR = data['heading_err']
                     else:
+                        self.frames_lost += 1
+                        self.frames_seen = max(0, self.frames_seen - 1)
+
+                    # Update Boolean Sight
+                    if self.frames_seen >= self.confidence_threshold:
+                        self.SPOT_FOUND = True
+                    if self.frames_lost >= self.lost_threshold:
+                        self.SPOT_FOUND = False
                         self.LATERAL_ERR = None
                         self.HEADING_ERR = None
 
             except zmq.Again:
                 break
-            except Exception as e:
-                print(f"Perception error: {e}")
-                break
 
-# ─── Stop signal ──────────────────────────────────────────────
-running = True
+# ─── Global State ─────────────────────────────────────────────
+perception = Perception()
+pan_angle  = 1500
+pan_dir    = 40  # Slower increment for "Step-and-Stare"
+running    = True
 
 def handle_stop(signum, frame):
     global running
     running = False
-    print('Stopping...')
-    board.pwm_servo_set_position(1, [[1, PAN_CENTER], [2, PAN_CENTER]])
     chassis.reset_motors()
+    board.pwm_servo_set_position(1, [[1, 1500], [2, 1500]])
 
 signal.signal(signal.SIGINT, handle_stop)
 
-# ─── State machine ────────────────────────────────────────────
-class State(Enum):
-    SEARCH        = 0
-    ALIGN_HEADING = 1
-    ALIGN_LATERAL = 2
-    APPROACH      = 3
-    CREEP         = 4
-    STOP          = 5
-
-# ─── Motor command ────────────────────────────────────────────
-class MotorCommand:
-    def __init__(self, vx=0, vy=0, w=0):
-        self.vx = vx
-        self.vy = vy
-        self.w  = w
-
-    def __str__(self):
-        return f"vx={self.vx:.2f}  vy={self.vy:.2f}  w={self.w:.3f}"
-
-# ─── Helpers ──────────────────────────────────────────────────
-def pulse_rotate(direction, heading_err_deg):
-    """
-    Rotate for a duration scaled to error magnitude then settle.
-    direction: +1 or -1
-    """
-    error    = abs(heading_err_deg)
-    duration = MIN_PULSE + (MAX_PULSE - MIN_PULSE) * min(error / 90.0, 1.0)
-    duration *= 0.75  # intentional undershoot — better to take two small pulses
-
-    chassis.set_velocity_cartesian(0, 0, direction * W_CMD)
-    time.sleep(duration)
-    chassis.set_velocity_cartesian(0, 0, 0)
-    time.sleep(SETTLE_TIME)  # let robot physically stop before reading heading again
-
-def pulse_strafe(direction):
-    """
-    Strafe for a fixed short duration then settle.
-    direction: +1 or -1
-    """
-    chassis.set_velocity_cartesian(direction * VY_CMD, 0, 0)
-    time.sleep(0.08)
-    chassis.set_velocity_cartesian(0, 0, 0)
-    time.sleep(0.1)
-
-# ─── FSM update ───────────────────────────────────────────────
 def update_state(state, p):
-    try:
-        match state:
-            case State.SEARCH:
-                if p.SPOT_FOUND:
-                    print(">>> SEARCH → ALIGN_HEADING")
-                    return State.ALIGN_HEADING
-                return State.SEARCH
+    if state == State.SEARCH and p.SPOT_FOUND:
+        return State.CONFIRM_SIGHT
+    
+    if state == State.CONFIRM_SIGHT:
+        if not p.SPOT_FOUND: return State.SEARCH
+        # Stay in confirm for a moment (handled in compute_cmd)
+        return State.ALIGN_HEADING if p.frames_seen > 15 else State.CONFIRM_SIGHT
 
-            case State.ALIGN_HEADING:
-                # lost marker — go back to search
-                if not p.SPOT_FOUND or p.HEADING_ERR is None:
-                    print(">>> ALIGN_HEADING → SEARCH (marker lost)")
-                    return State.SEARCH
-                if abs(p.HEADING_ERR) < HEADING_THRESHOLD:
-                    print(">>> ALIGN_HEADING → ALIGN_LATERAL")
-                    chassis.set_velocity_cartesian(0, 0, 0)
-                    time.sleep(0.3)  # settle before lateral correction
-                    return State.ALIGN_LATERAL
-                return State.ALIGN_HEADING
+    if state in [State.ALIGN_HEADING, State.ALIGN_LATERAL, State.APPROACH]:
+        if not p.SPOT_FOUND:
+            print(">>> Lost target. Returning to SEARCH.")
+            return State.SEARCH
 
-            case State.ALIGN_LATERAL:
-                # lost marker — go back to search
-                if not p.SPOT_FOUND or p.LATERAL_ERR is None:
-                    print(">>> ALIGN_LATERAL → SEARCH (marker lost)")
-                    return State.SEARCH
-                if abs(p.LATERAL_ERR) < LATERAL_THRESHOLD:
-                    print(">>> ALIGN_LATERAL → APPROACH")
-                    chassis.set_velocity_cartesian(0, 0, 0)
-                    time.sleep(0.3)
-                    return State.APPROACH
-                return State.ALIGN_LATERAL
-
-            case State.APPROACH:
-                if p.DISTANCE_ERR is not None and p.DISTANCE_ERR < DISTANCE_THRESHOLD_1:
-                    print(">>> APPROACH → CREEP")
-                    return State.CREEP
-                return State.APPROACH
-
-            case State.CREEP:
-                if p.DISTANCE_ERR is not None and p.DISTANCE_ERR < DISTANCE_THRESHOLD_2:
-                    print(">>> CREEP → STOP")
-                    return State.STOP
-                return State.CREEP
-
-            case State.STOP:
-                return State.STOP
-
-    except Exception as e:
-        print(f"update_state error: {e}")
+    # Standard transitions
+    if state == State.ALIGN_HEADING and abs(p.HEADING_ERR or 0) < HEADING_THRESHOLD:
+        return State.ALIGN_LATERAL
+    if state == State.ALIGN_LATERAL and abs(p.LATERAL_ERR or 0) < LATERAL_THRESHOLD:
+        return State.APPROACH
+    if state == State.APPROACH and p.DISTANCE_ERR and p.DISTANCE_ERR < DISTANCE_THRESHOLD_1:
+        return State.CREEP
+    if state == State.CREEP and p.DISTANCE_ERR and p.DISTANCE_ERR < DISTANCE_THRESHOLD_2:
+        return State.STOP
+    
     return state
 
-# ─── Command compute ──────────────────────────────────────────
 def compute_cmd(state, p):
-    global pan_angle, pan_dir, pan_rounds
-    cmd = MotorCommand()
+    global pan_angle, pan_dir
+    vx, vy, w = 0, 0, 0
 
-    try:
-        match state:
+    if state == State.SEARCH:
+        # STEP-AND-STARE logic
+        pan_angle += pan_dir
+        if pan_angle >= PAN_MAX or pan_angle <= PAN_MIN:
+            pan_dir *= -1
+        board.pwm_servo_set_position(0.1, [[2, pan_angle]])
+        time.sleep(0.1) # Give camera time to capture a frame while stationary
 
-            # ── SEARCH: pan camera, drive forward periodically ──
-            case State.SEARCH:
-                cmd.w  = 0
-                cmd.vx = 0
-                cmd.vy = 0
+    elif state == State.CONFIRM_SIGHT:
+        # Stop everything and look directly at it
+        chassis.set_velocity_cartesian(0, 0, 0)
 
-                # pan sweep
-                if pan_angle >= PAN_MAX:
-                    pan_dir = -100
-                elif pan_angle <= PAN_MIN:
-                    pan_dir = 100
-                    pan_rounds += 1
+    elif state == State.ALIGN_HEADING:
+        # Snap camera to center so error is relative to chassis
+        board.pwm_servo_set_position(0.2, [[2, PAN_CENTER]])
+        if p.HEADING_ERR:
+            w = W_CMD if p.HEADING_ERR > 0 else -W_CMD
+            # Pulse for 100ms then stop to check
+            chassis.set_velocity_cartesian(0, 0, w)
+            time.sleep(0.1)
+            chassis.set_velocity_cartesian(0, 0, 0)
+            time.sleep(0.2)
 
-                # after 2 full sweeps with no detection, drive forward a bit
-                if pan_rounds >= 2 and pan_angle == PAN_CENTER:
-                    chassis.set_velocity_cartesian(0, 20, 0)
-                    time.sleep(2.0)
-                    chassis.set_velocity_cartesian(0, 0, 0)
-                    pan_rounds = 0
+    elif state == State.ALIGN_LATERAL:
+        if p.LATERAL_ERR:
+            vy_val = VY_CMD if p.LATERAL_ERR > 0 else -VY_CMD
+            chassis.set_velocity_cartesian(vy_val, 0, 0)
+            time.sleep(0.1)
+            chassis.set_velocity_cartesian(0, 0, 0)
+            time.sleep(0.2)
 
-                pan_angle += pan_dir
-                pan_angle  = max(PAN_MIN, min(PAN_MAX, pan_angle))
-                board.pwm_servo_set_position(0.02, [[2, pan_angle]])
+    elif state == State.APPROACH:
+        vx = max(15, min(30, 0.75 * (p.DISTANCE_ERR or 0)))
 
-            # ── ALIGN_HEADING: bang-bang rotation with pulse timing ──
-            case State.ALIGN_HEADING:
-                # center servo before rotating body
-                board.pwm_servo_set_position(0.2, [[2, PAN_CENTER]])
-                pan_angle = PAN_CENTER
+    elif state == State.CREEP:
+        vx = 15 # Constant slow creep
 
-                if p.HEADING_ERR is None:
-                    return cmd
+    return vx, vy, w
 
-                if abs(p.HEADING_ERR) > HEADING_THRESHOLD:
-                    direction = 1 if p.HEADING_ERR > 0 else -1
-                    pulse_rotate(direction, p.HEADING_ERR)
-
-                cmd.w  = 0
-                cmd.vx = 0
-                cmd.vy = 0
-
-            # ── ALIGN_LATERAL: bang-bang strafe ──
-            case State.ALIGN_LATERAL:
-                pan_angle = PAN_CENTER
-
-                if p.LATERAL_ERR is None:
-                    return cmd
-
-                if abs(p.LATERAL_ERR) > LATERAL_THRESHOLD:
-                    direction = 1 if p.LATERAL_ERR > 0 else -1
-                    pulse_strafe(direction)
-
-                cmd.vx = 0
-                cmd.vy = 0
-                cmd.w  = 0
-
-            # ── APPROACH: proportional forward drive ──
-            case State.APPROACH:
-                if p.DISTANCE_ERR is None:
-                    return cmd
-                cmd.vx = D1K_P * p.DISTANCE_ERR
-                cmd.vy = 0
-                cmd.w  = 0
-
-            # ── CREEP: slower proportional forward drive ──
-            case State.CREEP:
-                if p.DISTANCE_ERR is None:
-                    return cmd
-                cmd.vx = D2K_P * p.DISTANCE_ERR
-                cmd.vy = 0
-                cmd.w  = 0
-
-            # ── STOP ──
-            case State.STOP:
-                chassis.set_velocity_cartesian(0, 0, 0)
-                cmd.vx = 0
-                cmd.vy = 0
-                cmd.w  = 0
-
-    except Exception as e:
-        print(f"compute_cmd error: {e}")
-
-    # clamp outputs
-    cmd.vx = max(-30, min(30, cmd.vx))
-    cmd.vy = max(-30, min(30, cmd.vy))
-    cmd.w  = max(-0.2, min(0.2, cmd.w))
-
-    print(f"[{state.name}] {cmd}")
-    return cmd
-
-# ─── Main loop ────────────────────────────────────────────────
 if __name__ == '__main__':
-    perception   = Perception()
     current_state = State.SEARCH
-
-    # center servo on startup
-    board.pwm_servo_set_position(1, [[2, PAN_CENTER]])
-    time.sleep(1)
-
+    board.pwm_servo_set_position(0.5, [[2, PAN_CENTER]])
+    
     while running:
-        # read all pending sensor messages
         perception.update()
-
-        # update FSM
         current_state = update_state(current_state, perception)
-
-        # compute motor command
-        cmd = compute_cmd(current_state, perception)
-
-        # send command — note axis mapping: (vy, vx, w)
-        chassis.set_velocity_cartesian(cmd.vy, cmd.vx, cmd.w)
-
-        time.sleep(0.05)  # 20Hz main loop
-
-    print("Shutdown complete")
+        vx, vy, w = compute_cmd(current_state, perception)
+        
+        # Only apply continuous velocity in Approach/Creep
+        if current_state in [State.APPROACH, State.CREEP]:
+            chassis.set_velocity_cartesian(vy, vx, w)
+        
+        time.sleep(0.05)
