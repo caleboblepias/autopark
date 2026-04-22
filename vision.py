@@ -30,8 +30,9 @@ class VisionPublisher:
 
         # camera
         self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320) # Reduce resolution to save CPU Utilization
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        self.cap.set(cv2.CAP_PROP_FPS, 15) # Reduce FPS to 15 to save CPU Utilization
 
         # queues — maxsize=1 means always process latest frame
         self.frame_queue = Queue(maxsize=1)
@@ -81,31 +82,37 @@ class VisionPublisher:
 
     """Publishes at fixed 50Hz, always uses most recent detection"""
     def _publish_thread(self):
+        MAX_MISSING_FRAMES = 5
         publish_interval = 1.0 / 50.0
-        last_result = None
+        
+        missing_count = 0
+        last_valid_msg = None
 
         while self.running:
             start = time.time()
 
             try:
                 detected = self.result_queue.get_nowait()
+                
                 if detected is not None:
-                    last_result = detected   # valid detection — update
+                    last_valid_msg = detected
+                    missing_count = 0
                 else:
-                    last_result = None       # marker lost — clear immediately
+                    missing_count += 1
             except:
-                pass  # no new result this cycle — reuse last_result as-is
+                missing_count += 1
 
-            if last_result:
-                self.socket.send_json(last_result)
+            if last_valid_msg and missing_count < MAX_MISSING_FRAMES:
+                last_valid_msg['timestamp'] = time.time()
+                self.socket.send_json(last_valid_msg)
             else:
+                last_valid_msg = None # Clear the memory
                 self.socket.send_json({
                     'type': 'vision',
                     'has_detection': False,
                     'timestamp': time.time()
                 })
-
-            # sleep remainder to maintain 50Hz
+            
             elapsed = time.time() - start
             sleep_time = publish_interval - elapsed
             if sleep_time > 0:
@@ -131,6 +138,11 @@ class VisionPublisher:
 
                 R, _ = cv2.Rodrigues(rvec)
                 heading_err = float(np.degrees(np.arctan2(R[0, 2], R[2, 2])))
+
+                if heading_err > 90:
+                    heading_err -= 180
+                elif heading_err < -90:
+                    heading_err += 180
 
                 img_w = frame.shape[1]
                 cx = corners[i][0][:, 0].mean() / img_w
