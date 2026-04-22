@@ -7,20 +7,22 @@ import HiwonderSDK.mecanum as mecanum
 from enum import Enum
 import zmq
 import json
+sys.path.append('/home/pi/TurboPi/HiwonderSDK')
+import ros_robot_controller_sdk as rrc
 
 # threshold definition
 CONFIDENCE_THRESHOLD = 1;
 LATERAL_THRESHOLD = 0.05;
-HEADING_THRESHOLD = 5;
+HEADING_THRESHOLD = 10;
 DISTANCE_THRESHOLD_1 = 400;
 DISTANCE_THRESHOLD_2 = 100;
 
 # PID constants
-LK_P = 80;
+LK_P = 1500;
 LK_I = 2;
 LK_D = 20;
 
-HK_P = 0.005;
+HK_P = 0.0005;
 HK_I = 2;
 HK_D = 1;
 
@@ -34,6 +36,12 @@ D2K_D = 1;
 
 # MecanumChassis instance
 chassis = mecanum.MecanumChassis()
+
+# ros controller instance for servo control
+board = rrc.Board()
+pan_angle = 1500
+rotation = 100
+rounds = 0
 
 # perception
 class Perception:
@@ -82,6 +90,7 @@ def stop(signum, frame):
 
     start = False
     print('Motors stopped')
+    board.pwm_servo_set_position(1, [[1, 1500], [2, 1500]])
     chassis.reset_motors()
     time.sleep(2)
 
@@ -91,10 +100,11 @@ signal.signal(signal.SIGINT, stop)
 # state definition
 class State(Enum):
     SEARCH = 0
-    ALIGN = 1
-    APPROACH = 2
-    CREEP = 3
-    STOP = 4
+    ALIGN_HEADING = 1
+    ALIGN_LATERAL = 2
+    APPROACH = 3
+    CREEP = 4
+    STOP = 5
 
 # initialize state
 current_state = State.SEARCH
@@ -109,15 +119,21 @@ def update_state(state, perception):
             case State.SEARCH:
                 print("SEARCH Mode")
                 if (perception.SPOT_FOUND):
-                    return State.ALIGN
+                    return State.ALIGN_HEADING
                 else:
                     return State.SEARCH
-            case State.ALIGN:
-                print("ALIGN Mode")
-                if (abs(perception.LATERAL_ERR) < LATERAL_THRESHOLD and abs(perception.HEADING_ERR) < HEADING_THRESHOLD):
+            case State.ALIGN_HEADING:
+                print("ALIGN_HEADING Mode")
+                if (abs(perception.HEADING_ERR) < HEADING_THRESHOLD):
+                    return State.ALIGN_LATERAL
+                else:
+                    return State.ALIGN_HEADING
+            case State.ALIGN_LATERAL:
+                print("ALIGN_LATERAL Mode")
+                if (abs(perception.LATERAL_ERR) < LATERAL_THRESHOLD):
                     return State.APPROACH
                 else:
-                    return State.ALIGN
+                    return State.ALIGN_LATERAL
             case State.APPROACH:
                 print("APPROACH Mode")
                 if (perception.DISTANCE_ERR < DISTANCE_THRESHOLD_1):
@@ -157,20 +173,51 @@ class MotorCommand:
 
 # PID control
 def compute_cmd(state, perception):
+    global pan_angle, rotation, rounds
     cmd = MotorCommand(0, 0, 0)
-    cmd.vx_prev = cmd.vx
-    cmd.vy_prev = cmd.vy
-    cmd.w_prev = cmd.w
     try:
         match state:
             case State.SEARCH:
                 cmd.vx = 0
                 cmd.vy = 0
                 cmd.w = 0
-            case State.ALIGN
-                cmd.vx = LK_P * perception.LATERAL_ERR * math.cos(perception.HEADING_ERR)
-                cmd.vy = LK_P * perception.LATERAL_ERR * math.sin(perception.HEADING_ERR)
+                if (pan_angle > 2450):
+                    rotation = -100
+                elif (pan_angle < 550):
+                    rotation = 100
+                    rounds += 1
+                if (pan_angle == 1500 and rounds == 2):
+                    chassis.set_velocity_cartesian(0, 20, 0)
+                    time.sleep(3)
+                    chassis.set_velocity_cartesian(0, 0, 0)
+                    rounds = 0
+                print(pan_angle)
+                pan_angle += rotation
+                board.pwm_servo_set_position(0.5, [[2, pan_angle]])
+
+            case State.ALIGN_HEADING:
+                board.pwm_servo_set_position(0.2, [[2, 1500]])
+                if (pan_angle > 1500):
+                    cmd.w = -0.2
+                    #pan_angle -= 100
+                    #time.sleep(2)
+                    #board.pwm_servo_set_position(0.5, [[2, pan_angle]]) 
+                elif (pan_angle < 1500):
+                    cmd.w = 0.2
+                    #pan_angle += 100
+                    #time.sleep(2)
+                    #board.pwm_servo_set_position(0.5, [[2, pan_angle]])
+                #board.pwm_servo_set_position(0.5, [[2, 1500]]) 
+            case State.ALIGN_LATERAL:
+                #board.pwm_servo_set_position(0.5, [[2, 1500]]) 
+                pan_angle = 0
+                
+                #cmd.vx = LK_P * perception.LATERAL_ERR * math.cos(perception.HEADING_ERR)
+                cmd.vx = 0
+                #cmd.vy = LK_P * perception.LATERAL_ERR * math.sin(math.radians(perception.HEADING_ERR))
+                cmd.vy = LK_P * perception.LATERAL_ERR
                 #cmd.w = LK_P * perception.HEADING_ERR - (cmd.w - cmd.w_prev) / 0.05
+                #cmd.w = -HK_P * perception.HEADING_ERR
             case State.APPROACH:
                 cmd.vx = D1K_P * perception.DISTANCE_ERR
                 cmd.vy = 0
@@ -186,10 +233,13 @@ def compute_cmd(state, perception):
 
     except:
         print("compute_cmd failed")
-    if (cmd.vx > 40):
-        cmd.vx = 40
-    if (cmd.vy > 40):
-        cmd.vy = 40
+    if (cmd.vx > 30):
+        cmd.vx = 30
+    if (abs(cmd.vy) > 30):
+        if (cmd.vy > 0):
+            cmd.vy = 30
+        else:
+            cmd.vy = -30
     if (abs(cmd.w) > 0.2):
         if (cmd.w > 0):
             cmd.w = 0.2
@@ -225,7 +275,7 @@ if __name__ == '__main__':
             print('Motors stopped (main)')
             break
 
-        #time.sleep(0.05)
+        time.sleep(0.25)
 
     
 
